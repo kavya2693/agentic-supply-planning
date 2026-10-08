@@ -1,20 +1,20 @@
 # agentic-supply-planning
 
 Demand forecasts turned into budgeted, approved purchase orders by a supervisor and four
-LangGraph agents, for a lubricants supply chain.
+LangGraph agents. Ships with a retail range (groceries to electronics) and a lubricants
+range; the agents run unchanged on both.
 
 ## The problem
 
-A lubricants supplier carries hundreds of SKUs, from 1 L motorcycle-oil bottles sold
-through workshops to 209 L drums sold to fleets and factories. Some are blended locally
-in two weeks; others are imported and take up to ten. Every two weeks a planner has to
-decide, SKU by SKU, what to reorder, what to expedite and what is already overstocked,
-within a purchasing budget, before the festive-season peak or a monsoon slowdown.
+A retailer carrying hundreds of SKUs, from fresh produce that spoils in days to imported
+electronics accessories with a ten-week lead time, has to decide every two weeks, SKU by
+SKU, what to reorder, what to expedite and what is already overstocked, within a
+purchasing budget, ahead of Ramadan, back to school or the year-end sales season.
 
-Done by hand in spreadsheets, this is where both failures come from: stock-outs on
-fast-moving packs, and months of excess on slow ones (high days inventory outstanding).
-A forecast alone does not fix it, because the forecast still has to be turned into
-hundreds of order decisions, approvals and messages every cycle.
+Done by hand in spreadsheets, this is where both failures come from: empty shelves on
+fast movers, and cash tied up in slow or spoiling stock. A forecast alone does not fix it,
+because the forecast still has to be turned into hundreds of order decisions, approvals
+and messages every cycle.
 
 ## Why it is hard
 
@@ -46,31 +46,36 @@ supervisor ─► demand ─► inventory ─► purchase orders ─► workflow
      ▲__________|____________|______________|_______________|   (shared state + audit log)
 ```
 
-## Results (synthetic data, 800 SKUs, 3 years weekly)
+## Results (synthetic data, 800 SKUs per range, 3 years weekly)
 
-| | |
-|---|---|
-| Forecast error, 12-week backtest (WAPE) | **17.8%** vs 27.4% seasonal naive, 26.6% 4-week average |
-| P90 coverage | 90% of actual weeks fall at or below P90 (target 90%) |
-| Stock status | 105 critical · 375 reorder · 146 healthy · 174 excess |
-| Purchase orders | 476 proposed: 323 auto-approved, 133 sent to a planner (105 expedites, 28 large), 20 deferred by budget |
-| Tests | 7 passing, including human-approval pause and resume |
+| | Retail | Lubricants |
+|---|---|---|
+| Forecast WAPE, 12-week backtest | **8.4%** (seasonal naive 19.6%, 4-week average 18.4%) | **18.2%** (28.2%, 27.4%) |
+| Forecast bias / P90 coverage | −0.1% / 91% | −0.5% / 90% |
+| Stock status | 23 critical · 202 reorder · 275 healthy · 300 excess | 93 critical · 376 reorder · 203 healthy · 128 excess |
+| Purchase orders | 223: 197 auto-approved, 26 to a planner (23 expedites, 3 large) | 466: 306 auto-approved, 114 to a planner, 46 deferred by budget |
+| Touchless PO rate | 88% | 66% |
+| Fill rate over the protection window | 92.8% no action → 96.7% auto-approved → 99.1% queue approved | 91.0% → 94.9% → 98.6% |
+| DIO / excess stock value | 49.8 days / 411,788 | 62.0 days / 1,608,509 |
 
-The data is synthetic (no company data), so the operational numbers show the workflow
-behaving sensibly, not business impact. The 174 excess SKUs are a reminder that the
-workflow flags overstock but cannot fix it this cycle; that needs redistribution or promotion.
+The data is synthetic (no company data), so these numbers show the workflow behaving
+sensibly, not business impact. Lubricants hits its budget cap (46 orders deferred) while
+retail uses 27% of its cap; the excess counts are a reminder that the workflow flags
+overstock but cannot fix it in one cycle. [docs/USE_CASE.md](docs/USE_CASE.md) walks
+through one cycle and the KPIs in detail.
 
 ## Run it
 
 ```bash
 uv sync
-uv run supply-planning --refresh        # generate data, train, run one cycle
+uv run supply-planning --refresh                       # retail: generate data, train, run one cycle
+uv run supply-planning --domain lubricants --refresh   # same agents, lubricants range
 uv run supply-planning --interactive    # approve large / expedited POs yourself
 make check                              # ruff, format, mypy, pytest
 docker build -t supply-planning . && docker run --rm supply-planning
 ```
 
-Outputs land in `outputs/`: `purchase_orders.csv`, `approval_queue.csv`,
+Outputs land in `outputs/<domain>/`: `purchase_orders.csv`, `approval_queue.csv`,
 `inventory_health.csv`, `audit_log.jsonl`, `run_report.md`. Set `OPENROUTER_API_KEY`
 (see `.env.example`) or run Ollama locally for a model-written briefing; otherwise a
 rule-based briefing is used. Policy (budget, approval limit, review period, target cover)
@@ -80,20 +85,22 @@ lives in `src/supply_planning/config.py`.
 
 ```
 src/supply_planning/
-  data.py       seeded synthetic generator (SKUs, weekly sales, stock, open orders)
+  domains.py    retail and lubricants profiles: families, channels, packs, suppliers, seasons
+  data.py       seeded synthetic generator for any profile (SKUs, weekly sales, stock, open orders)
   forecast.py   global LightGBM, direct 12-week horizon, P50 and P90 heads, backtest
-  tools.py      stock projection, order-up-to with safety stock, budget, approval routing
+  tools.py      stock projection, order-up-to with safety stock, budget, routing, KPIs
   graph.py      LangGraph supervisor + demand, inventory, purchase-order, workflow agents
   llm.py        optional briefing model (OpenRouter or Ollama)
   cli.py        one planning cycle, interactive approvals, report and audit log
-docs/adr/       architecture decisions
-tests/          policy, budget, routing, no-model run, human pause and resume
+docs/           use case walkthrough, architecture decisions
+tests/          both domains: policy, budget, routing, fill rate, no-model run, human pause and resume
 ```
 
 ## Limitations
 
 - Synthetic data only. The operational numbers show the workflow behaving sensibly, not business impact.
-- Single echelon: one stocking point, no plant-to-depot-to-distributor network.
+- Single echelon: one stocking point per range, no store-level allocation or DC-to-store network.
+- Perishables are modelled by a short cover limit, not by batch expiry dates.
 - No supplier capacity limits or price breaks; MOQ is the only order constraint.
 - The model-written briefing path is not covered by tests (no key in CI); everything that decides an order is.
 - State is checkpointed in memory; a production run would use a persistent checkpointer.

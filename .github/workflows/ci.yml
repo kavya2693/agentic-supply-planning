@@ -31,5 +31,7 @@ jobs:
       - name: tests
         run: uv run pytest -q
 
-      - name: end-to-end planning cycle
-        run: uv run supply-planning --refresh
+      - name: end-to-end planning cycle, both domains
+        run: |
+          uv run supply-planning --refresh
+          uv run supply-planning --domain lubricants --refresh
