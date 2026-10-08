@@ -10,7 +10,8 @@ import lightgbm as lgb
 import numpy as np
 import pandas as pd
 
-from .config import DATA, HORIZON, SEED
+from .config import HORIZON, SEED
+from .data import data_dir
 
 CATS = ["family", "channel", "pack", "source"]
 
@@ -77,7 +78,9 @@ def wape(actual, pred):
     return float(np.abs(actual - pred).sum() / max(actual.sum(), 1e-9))
 
 
-def train_and_forecast(skus: pd.DataFrame, sales: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
+def train_and_forecast(
+    skus: pd.DataFrame, sales: pd.DataFrame, domain: str = "retail"
+) -> tuple[pd.DataFrame, dict]:
     Y, P, sku_ids, weeks = _panel(sales)
     meta = skus.set_index("sku").loc[sku_ids].reset_index()
     T = Y.shape[1]
@@ -97,6 +100,7 @@ def train_and_forecast(skus: pd.DataFrame, sales: pd.DataFrame) -> tuple[pd.Data
         "wape_seasonal_naive": round(wape(actual, Xh.lag52_target.to_numpy()), 3),
         "wape_moving_avg_4wk": round(wape(actual, Xh.mean4.to_numpy()), 3),
         "p90_coverage": round(float((actual <= pred90).mean()), 3),
+        "bias_p50": round(float((pred50 - actual).sum() / max(actual.sum(), 1e-9)), 3),
     }
 
     # 2) Production forecast from the latest week (no promotions planned yet).
@@ -116,12 +120,14 @@ def train_and_forecast(skus: pd.DataFrame, sales: pd.DataFrame) -> tuple[pd.Data
         }
     )
     fc["p90"] = np.maximum(fc.p90, fc.p50)
-    fc.to_csv(DATA / "forecast.csv", index=False)
-    (DATA / "forecast_metrics.json").write_text(json.dumps(metrics, indent=2))
+    out = data_dir(domain)
+    fc.to_csv(out / "forecast.csv", index=False)
+    (out / "forecast_metrics.json").write_text(json.dumps(metrics, indent=2))
     return fc, metrics
 
 
-def load_forecast(skus, sales, refresh=False):
-    if refresh or not (DATA / "forecast.csv").exists():
-        return train_and_forecast(skus, sales)
-    return pd.read_csv(DATA / "forecast.csv"), json.loads((DATA / "forecast_metrics.json").read_text())
+def load_forecast(skus, sales, domain="retail", refresh=False):
+    d = data_dir(domain)
+    if refresh or not (d / "forecast.csv").exists():
+        return train_and_forecast(skus, sales, domain)
+    return pd.read_csv(d / "forecast.csv"), json.loads((d / "forecast_metrics.json").read_text())

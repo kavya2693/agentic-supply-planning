@@ -1,8 +1,9 @@
 """Run one planning cycle.
 
-supply-planning                 # automatic: big POs wait in the approval queue
-supply-planning --interactive   # pause for a planner to approve each big PO
-supply-planning --refresh       # regenerate data and retrain the forecaster first
+supply-planning                        # retail range; big POs wait in the approval queue
+supply-planning --domain lubricants    # same agents on a lubricants range
+supply-planning --interactive          # pause for a planner to approve each big PO
+supply-planning --refresh              # regenerate data and retrain the forecaster first
 """
 
 import argparse
@@ -12,8 +13,9 @@ import uuid
 import pandas as pd
 from langgraph.types import Command
 
-from supply_planning.config import OUT
+from supply_planning.config import DEFAULT_DOMAIN, OUT
 from supply_planning.data import generate
+from supply_planning.domains import DOMAINS
 from supply_planning.graph import build_graph
 
 
@@ -21,13 +23,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--interactive", action="store_true")
     ap.add_argument("--refresh", action="store_true")
+    ap.add_argument("--domain", choices=sorted(DOMAINS), default=DEFAULT_DOMAIN)
     args = ap.parse_args()
     if args.refresh:
-        generate()
+        generate(args.domain)
 
     graph = build_graph()
     cfg = {"configurable": {"thread_id": str(uuid.uuid4())}}
-    state = graph.invoke({"refresh": args.refresh, "interactive": args.interactive}, cfg)
+    state = graph.invoke(
+        {"domain": args.domain, "refresh": args.refresh, "interactive": args.interactive}, cfg
+    )
     while "__interrupt__" in state:
         pending = state["__interrupt__"][0].value["pending"]
         print(f"\n{len(pending)} purchase orders need a planner decision:")
@@ -38,17 +43,18 @@ def main():
             answers[p["po_id"]] = a.strip().lower() == "y"
         state = graph.invoke(Command(resume=answers), cfg)
 
-    OUT.mkdir(exist_ok=True)
-    pd.DataFrame(state["health"]).to_csv(OUT / "inventory_health.csv", index=False)
+    out = OUT / args.domain
+    out.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(state["health"]).to_csv(out / "inventory_health.csv", index=False)
     pos = pd.DataFrame(state.get("pos") or [])
     if len(pos):
-        pos.to_csv(OUT / "purchase_orders.csv", index=False)
-        pos[pos.decision == "pending"].to_csv(OUT / "approval_queue.csv", index=False)
-    with open(OUT / "audit_log.jsonl", "w") as f:
+        pos.to_csv(out / "purchase_orders.csv", index=False)
+        pos[pos.decision == "pending"].to_csv(out / "approval_queue.csv", index=False)
+    with open(out / "audit_log.jsonl", "w") as f:
         for row in state["audit"]:
             f.write(json.dumps(row, default=str) + "\n")
     report = _report(state)
-    (OUT / "run_report.md").write_text(report)
+    (out / "run_report.md").write_text(report)
     print(report)
 
 
@@ -71,13 +77,29 @@ def _report(s) -> str:
             f"Approved value {k['approved_po_value']:,} · pending approval {k['pending_po_value']:,}",
             "",
         ]
+    fill = f"fill rate over the protection window {k['fill_rate_no_action']:.1%} with no new orders"
+    if "fill_rate_with_approved" in k:
+        fill += (
+            f", {k['fill_rate_with_approved']:.1%} with auto-approved orders, "
+            f"{k['fill_rate_if_pending_approved']:.1%} if the planner approves the queue"
+        )
+    kpi = (
+        f"{fill}; forecast bias {m.get('bias_p50', 0):+.1%}; "
+        f"{k['skus_at_stockout_risk']} SKUs at stock-out risk; stock value {k['stock_value']:,}, "
+        f"DIO {k['dio_days']} days, excess stock {k['excess_stock_value']:,}"
+    )
+    if "touchless_po_rate" in k:
+        kpi += f"; touchless POs {k['touchless_po_rate']:.0%}"
+        kpi += f"; budget used {k['budget_used']:.0%} of {k['budget']:,}"
     lines += [
-        f"**Inventory:** stock value {k['stock_value']:,}, DIO {k['dio_days']} days",
+        f"**Domain:** {s.get('domain', DEFAULT_DOMAIN)}",
+        "",
+        f"**Supply-chain KPIs:** {kpi}",
         "",
         "## Briefing",
         s["briefing"],
         "",
-        f"Audit trail: {len(s['audit'])} decisions logged to outputs/audit_log.jsonl",
+        f"Audit trail: {len(s['audit'])} decisions logged to audit_log.jsonl",
     ]
     return "\n".join(lines)
 

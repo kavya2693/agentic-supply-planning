@@ -17,12 +17,14 @@ from langgraph.graph import END, StateGraph
 from langgraph.types import interrupt
 
 from . import tools
+from .config import AUTO_APPROVE_LIMIT, DEFAULT_DOMAIN
 from .data import load
 from .forecast import load_forecast
 from .llm import get_llm
 
 
 class State(TypedDict, total=False):
+    domain: str
     refresh: bool
     interactive: bool
     done: Annotated[list[str], operator.add]
@@ -30,6 +32,7 @@ class State(TypedDict, total=False):
     metrics: dict
     health: list[dict]  # records, so the checkpointer can persist state
     pos: list[dict]
+    budget: float
     kpis: dict
     notifications: list[str]
     briefing: str
@@ -42,9 +45,16 @@ def _log(agent, action, **detail):
     ]
 
 
-def _data():
-    skus, sales, inv = load()
-    return skus, sales, inv
+def _domain(state: State) -> str:
+    return state.get("domain") or DEFAULT_DOMAIN
+
+
+def _data(state: State):
+    return load(_domain(state))
+
+
+def _forecast(state: State, skus, sales, refresh=False):
+    return load_forecast(skus, sales, _domain(state), refresh=refresh)
 
 
 # ── Supervisor ───────────────────────────────────────────────────────────────
@@ -65,8 +75,8 @@ def supervisor(state: State) -> dict:
 
 # ── 1. Demand agent ──────────────────────────────────────────────────────────
 def demand_agent(state: State) -> dict:
-    skus, sales, _ = _data()
-    _, metrics = load_forecast(skus, sales, refresh=state.get("refresh", False))
+    skus, sales, _ = _data(state)
+    _, metrics = _forecast(state, skus, sales, refresh=state.get("refresh", False))
     beats = metrics["wape_model_p50"] < metrics["wape_seasonal_naive"]
     return {
         "done": ["demand"],
@@ -83,8 +93,8 @@ def demand_agent(state: State) -> dict:
 
 # ── 2. Inventory monitoring agent ────────────────────────────────────────────
 def inventory_agent(state: State) -> dict:
-    skus, sales, inv = _data()
-    fc, _ = load_forecast(skus, sales)
+    skus, sales, inv = _data(state)
+    fc, _ = _forecast(state, skus, sales)
     health = tools.inventory_health(skus, inv, fc)
     counts = health.status.value_counts().to_dict()
     return {
@@ -96,11 +106,14 @@ def inventory_agent(state: State) -> dict:
 
 # ── 3. Purchase-order agent ──────────────────────────────────────────────────
 def po_agent(state: State) -> dict:
-    skus, _, _ = _data()
-    pos = tools.propose_purchase_orders(skus, pd.DataFrame(state["health"]))
+    skus, sales, _ = _data(state)
+    fc, _ = _forecast(state, skus, sales)
+    budget = tools.cycle_budget(skus, fc)
+    pos = tools.propose_purchase_orders(skus, pd.DataFrame(state["health"]), budget)
     return {
         "done": ["po"],
         "pos": pos.to_dict("records"),
+        "budget": budget,
         "audit": _log(
             "po_agent",
             "propose_pos",
@@ -113,10 +126,11 @@ def po_agent(state: State) -> dict:
 
 # ── 4. Workflow automation agent ─────────────────────────────────────────────
 def workflow_agent(state: State) -> dict:
-    skus, sales, inv = _data()
-    fc, _ = load_forecast(skus, sales)
+    skus, sales, inv = _data(state)
+    fc, _ = _forecast(state, skus, sales)
     pos = state.get("pos")
-    pos = tools.route_approvals(pd.DataFrame(pos)) if pos else pd.DataFrame(columns=["decision"])
+    limit = AUTO_APPROVE_LIMIT[_domain(state)]
+    pos = tools.route_approvals(pd.DataFrame(pos), limit) if pos else pd.DataFrame(columns=["decision"])
     audit = _log(
         "workflow_agent",
         "route_approvals",
@@ -156,7 +170,7 @@ def workflow_agent(state: State) -> dict:
             f"Sales & ops: {len(excess)} SKUs hold more than the target cover; "
             f"consider redistribution or promotion to bring DIO down."
         )
-    kpis = tools.inventory_kpis(skus, inv, fc, pos if len(pos) else None)
+    kpis = tools.supply_chain_kpis(skus, inv, fc, health, pos if len(pos) else None, state.get("budget"))
     return {
         "done": ["workflow"],
         "pos": pos.to_dict("records"),
