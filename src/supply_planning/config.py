@@ -8,15 +8,17 @@ DATA = ROOT / "data"
 OUT = ROOT / "outputs"
 
 SEED = 7
-N_SKUS = 800  # lubricants portfolio size
+DEFAULT_DOMAIN = "retail"
+N_SKUS = 800  # SKUs in the range
 N_WEEKS = 156  # 3 years of weekly history
 HORIZON = 12  # forecast weeks ahead
 REVIEW_WEEKS = 2  # planning cycle: POs are raised every 2 weeks
 
 # Purchase-order policy
 SERVICE_QUANTILE = 0.9  # order-up-to uses the P90 forecast
-CYCLE_BUDGET = 2_500_000  # spend cap per planning cycle, ~2 weeks of demand at cost
+BUDGET_WEEKS = 2.2  # cycle spend cap, in weeks of forecast demand at cost
 TARGET_COVER_WEEKS = 8  # above this, stock counts as excess (drives DIO up)
+PERISHABLE_MAX_COVER_WEEKS = 2  # fresh lines spoil, so excess starts much sooner
 
-# Approval workflow
-AUTO_APPROVE_LIMIT = 15_000  # POs at or below this value are approved automatically
+# Approval workflow: POs at or below this value are approved automatically
+AUTO_APPROVE_LIMIT = {"retail": 5_000, "lubricants": 15_000}
